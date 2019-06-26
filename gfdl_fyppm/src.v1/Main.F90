@@ -30,10 +30,10 @@ integer :: jord, npy, ng
 real, allocatable, dimension (:,:,:) :: c
 real, allocatable, dimension (:,:,:) :: q
 real, allocatable, dimension (:,:,:) :: wk
-real, allocatable, dimension (:,:,:) :: area
+real, allocatable, dimension (:,:,:) :: area, rarea
 real, allocatable, dimension (:,:,:) :: al, bl, br, dq
 real, allocatable, dimension (:,:) :: dya
-real, allocatable, dimension (:,:,:) :: flux, dm
+real, allocatable, dimension (:,:,:) :: flux, dm, flx1
 
 real :: a, b
 
@@ -81,9 +81,12 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
   
   allocate( q   (ifirst:ilast,jfirst-ng:jlast+ng,1:km) )
   allocate( area(ifirst:ilast,jfirst   :jlast+1, 1:km ) )
+  allocate( rarea(ifirst:ilast,jfirst   :jlast+1, 1:km ) )
   allocate(   wk(ifirst:ilast,jfirst   :jlast+1, 1:km ) )
 
   allocate( flux (isd:ied,js:je+1,1:km) )
+flux(:,:,:) = 0.
+  allocate( flx1 (isd:ied,js:je+1,1:km) )
   allocate( dm   (isd:ied,js-2:je+2,1:km) )
 
   allocate(al(ifirst:ilast,jfirst-1:jlast+2,km))
@@ -107,11 +110,13 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
      enddo
   enddo
 
+ rarea(:,:,:) = 0.
   do k = 1, km
      do j = jfirst, jlast+1
         do i = ifirst, ilast
            wk(i,j,k) = 1.0+k*1.e-2+j*2.e-4+i*3*1.e-6
            area(i,j,k) = 12.0+k*1.e-2+j*2.e-4+i*3*1.e-6
+           rarea(i,j,k) = 1./area(i,j,k)
         enddo
      enddo
   enddo
@@ -124,7 +129,7 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
 
     call CPU_TIME(time1)
 !!$ACC enter data copyin(wk,area,c,q,dya,dm,flux)
-!$ACC DATA copy(wk) copyin(area,c,q,dya,dm,flux,ppm_limiter,jord,jfirst,jlast,npy) copyout(al,bl,br,dq)
+!$ACC DATA copy(wk) copyin(area,rarea,c,q,dya,dm,flux,flx1,ppm_limiter,jord,jfirst,jlast,npy) copyout(al,bl,br,dq)
     do iter = 1, 10000
       if (mod(iter,10) .lt. 6) then
         jord = 9
@@ -132,7 +137,7 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
         jord = 12
       end if
 !$omp parallel do 
-!$acc kernels 
+!$acc kernels async
       do k=1,km
         flux(:,:,k) = 1.0
         dm  (:,:,k) = 1.0
@@ -140,16 +145,27 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
 !$acc end kernels
       call fyppm(c,  q,  flux, jord, ifirst, ilast, jfirst, jlast, npy, dm, ppm_limiter, &
                    dya, isd, ied, jsd, jed, js, je, ng, km, al, bl, br, dq )
+!!$acc kernels loop collapse(3) present(wk,flux,flx1,rarea,area) async
+!      do k=1,km
+!        do j = jfirst, jlast+1
+!          do i = ifirst, ilast
+!            flx1(i,j,k) = flux(i,j,k)
+!          end do
+!        end do
+!      end do 
+!!$acc end kernels          
+
 !$omp parallel do 
-!$acc kernels loop collapse(3)
+!$acc kernels loop collapse(3) present(wk,flux,flx1,rarea,area) async
       do k=1,km
         do j = jfirst, jlast+1
           do i = ifirst, ilast
-            wk(i,j,k) = wk(i,j,k) + flux(i,j,k)/area(i,j,k)
+            wk(i,j,k) = wk(i,j,k) + flux(i,j,k)*rarea(i,j,k)
           end do
         end do
       end do 
 !$acc end kernels          
+!$acc wait
     end do
 !$ACC END DATA
 !!!$ACC exit data copyout(wk)
@@ -176,6 +192,7 @@ if(myrank==0) print*, "ndev = ", ndev, ", npes = ", npes
     deallocate( c )
     deallocate( q )
     deallocate( area )
+    deallocate( rarea )
     deallocate( wk )
 
     call mpi_finalize(info)
